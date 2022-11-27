@@ -16,7 +16,7 @@ use std::{alloc, mem::size_of, panic::catch_unwind, ptr};
 
 #[derive(Debug, Default)]
 struct EraserContext {
-    user_fn: Option<extern "C" fn()>,
+    user_fn: Option<fn()>,
     thread_result: Option<std::thread::Result<()>>,
 }
 
@@ -63,7 +63,7 @@ impl Memory {
 }
 
 /// Run a function on a ephemeral stack and immediately erase the stack
-pub fn run_then_erase(f: extern "C" fn(), stack_size: usize) {
+pub fn run_then_erase(f: fn(), stack_size: usize) {
     // TODO: Document/enforce valid stack_size values
 
     let stack_align = 1024 * 1024;
@@ -168,7 +168,7 @@ mod tests {
         static INFO: RefCell<CryptoSimulInfo> = Default::default();
     }
 
-    extern "C" fn bump_ctr() {
+    fn bump_ctr() {
         INFO.with(|cell| {
             (*cell.borrow_mut()).ctr += 1;
         });
@@ -187,7 +187,7 @@ mod tests {
         assert_eq!(ctr, 1);
     }
 
-    extern "C" fn do_panic() {
+    fn do_panic() {
         panic!();
     }
 
