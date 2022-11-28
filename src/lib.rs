@@ -24,6 +24,7 @@ thread_local! {
     static CTX: RefCell<EraserContext> = Default::default();
 }
 
+#[derive(Debug, Clone)]
 struct Memory {
     layout: alloc::Layout,
     ptr: *mut u8,
@@ -31,6 +32,9 @@ struct Memory {
 
 impl Drop for Memory {
     fn drop(&mut self) {
+        if self.ptr.is_null() {
+            return;
+        }
         self.erase();
         unsafe {
             alloc::dealloc(self.ptr, self.layout);
@@ -84,7 +88,7 @@ pub fn run_then_erase(f: fn(), stack_size: usize) {
         })
     });
 
-    // Call user function through wrapper
+    // Switch the location of the stack and call the wrapper function
     unsafe {
         let stack_top = mem.ptr.add(stack_size);
         arch::asm!(
