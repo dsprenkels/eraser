@@ -90,30 +90,8 @@ pub fn run_then_erase(f: fn(), stack_size: usize) {
 
     // Switch the location of the stack and call the wrapper function
     unsafe {
-        let stack_top = mem.ptr.add(stack_size);
-        arch::asm!(
-            // Stash the old rsp
-            "mov rax, rsp",
-            // Switch stacks
-            "mov rsp, {stack_top}",
-            // Save the original stack and frame pointer values
-            "push rbp",
-            "push rax",
-            // Put the return address on the top of the stack
-            "lea rax, [9999f + rip]",
-            "push rax",
-            // Call the running function using the new stack
-            "jmp {user_fn}",
-            // Wrapped function will return to here
-            "9999:",
-            // Restore the original stack and frame pointer values
-            "pop rax",
-            "pop rbp",
-            "mov rsp, rax",
-            user_fn = in(reg) do_run_user_fn,
-            stack_top = in(reg) stack_top,
-            out("rax") _,
-        );
+        let stack_top = mem.ptr.add(mem.layout.size());
+        run_then_erase_asm(stack_top);
     };
 
     // Double-check that the user function did indeed finish
@@ -134,6 +112,41 @@ pub fn run_then_erase(f: fn(), stack_size: usize) {
             resume_unwind(err);
         }
     });
+}
+
+/// Run the "assembly" part of the `run_then_erase` function.
+///
+/// This function is separate, because the user function might clobber any kind
+/// of register, even avx2 or x87 registers.  Instead of clobbering *all* of
+/// them in the asm! directive, we enter a separate function that explicitly
+/// uses the C ABI.  This way, we know with reasonably certainty that the
+/// calling function has saved any reasonable register that it needs to stay
+/// intact.
+#[inline(never)]
+unsafe extern "C" fn run_then_erase_asm(stack_top: *mut u8) {
+        arch::asm!(
+            // Stash the old rsp
+            "mov rax, rsp",
+            // Switch stacks
+            "mov rsp, {stack_top}",
+            // Save the frame pointer and stack pointer values
+            "push rbp",
+            "push rax",
+            // Put the return address on the top of the stack
+            "lea rax, [9999f + rip]",
+            "push rax",
+            // Call the running function using the new stack
+            "jmp {user_fn}",
+            // Wrapped function will return to here
+            "9999:",
+            // Restore the original stack and frame pointer values
+            "pop rax",
+            "pop rbp",
+            "mov rsp, rax",
+            user_fn = in(reg) do_run_user_fn,
+            stack_top = in(reg) stack_top,
+            out("rax") _,
+        );
 }
 
 extern "C" fn do_run_user_fn() {
