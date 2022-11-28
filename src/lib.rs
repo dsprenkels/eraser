@@ -87,7 +87,29 @@ pub fn run_then_erase(f: fn(), stack_size: usize) {
     // Call user function through wrapper
     unsafe {
         let stack_top = mem.ptr.offset(stack_size as isize);
-        __nl_as8_eraser_stackhop(do_run_user_fn, stack_top);
+        arch::asm!(
+            // Stash the old rsp
+            "mov rax, rsp",
+            // Switch stacks
+            "mov rsp, {stack_top}",
+            // Save the original stack and frame pointer values
+            "push rbp",
+            "push rax",
+            // Put the return address on the top of the stack
+            "lea rax, [9999f + rip]",
+            "push rax",
+            // Call the running function using the new stack
+            "jmp {user_fn}",
+            // Wrapped function will return to here
+            "9999:",
+            // Restore the original stack and frame pointer values
+            "pop rax",
+            "pop rbp",
+            "mov rsp, rax",
+            user_fn = in(reg) do_run_user_fn,
+            stack_top = in(reg) stack_top,
+            out("rax") _,
+        );
     };
 
     // Double-check that the user function did indeed finish
@@ -109,34 +131,6 @@ pub fn run_then_erase(f: fn(), stack_size: usize) {
         }
     });
 }
-
-extern "C" {
-    fn __nl_as8_eraser_stackhop(wrapper: extern "C" fn(), stack_top: *mut u8);
-}
-
-arch::global_asm!(
-    ".global __nl_as8_eraser_stackhop",
-    "__nl_as8_eraser_stackhop:",
-    // Stash the old rsp
-    "mov r8, rsp",
-    // Switch stacks
-    "mov rsp, rsi",
-    // Save the original stack and frame pointer values
-    "push rbp",
-    "push r8",
-    // Put the return address on the top of the stack
-    "lea rax, [1f + rip]",
-    "push rax",
-    // Call the running function using the new stack
-    "jmp rdi",
-    // Wrapped function will return to here
-    "1:",
-    // Restore the original stack and frame pointer values
-    "pop rax",
-    "pop rbp",
-    "mov rsp, rax",
-    "ret",
-);
 
 extern "C" fn do_run_user_fn() {
     CTX.with(|cell| {
