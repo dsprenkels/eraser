@@ -54,7 +54,7 @@ impl Memory {
         let mut offset = 0;
         while offset < self.layout.size() {
             unsafe {
-                let cur = self.ptr.offset(offset as isize) as *mut u64;
+                let cur = self.ptr.add(offset) as *mut u64;
                 ptr::write_volatile(cur, 0xDEADBEEF);
             }
             offset += size_of::<u64>()
@@ -86,7 +86,7 @@ pub fn run_then_erase(f: fn(), stack_size: usize) {
 
     // Call user function through wrapper
     unsafe {
-        let stack_top = mem.ptr.offset(stack_size as isize);
+        let stack_top = mem.ptr.add(stack_size);
         arch::asm!(
             // Stash the old rsp
             "mov rax, rsp",
@@ -144,7 +144,7 @@ extern "C" fn do_run_user_fn() {
                 return;
             }
         };
-        ctx.thread_result = Some(catch_unwind(|| user_fn()));
+        ctx.thread_result = Some(catch_unwind(user_fn));
     });
 }
 
