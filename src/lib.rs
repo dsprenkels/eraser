@@ -27,38 +27,37 @@ thread_local! {
 #[derive(Debug, Clone)]
 struct Memory {
     layout: alloc::Layout,
-    ptr: *mut u8,
+    ptr: std::ptr::NonNull<u8>,
 }
 
 impl Drop for Memory {
     fn drop(&mut self) {
-        if self.ptr.is_null() {
-            return;
-        }
         self.erase();
         unsafe {
-            alloc::dealloc(self.ptr, self.layout);
+            let ptr_mut = self.ptr.as_mut();
+            alloc::dealloc(ptr_mut, self.layout);
         }
-        self.ptr = null_mut();
     }
 }
 
 impl Memory {
     fn new(layout: alloc::Layout) -> Self {
         assert_ne!(layout.size(), 0);
-        Self {
-            layout,
-            // SAFETY:
-            //   * Checked that the size is not equal to 0.
-            ptr: unsafe { alloc::alloc_zeroed(layout) },
-        }
+        // SAFETY:
+        //   * Checked that the size is not equal to 0.
+        let ptr_opt = core::ptr::NonNull::new(unsafe { alloc::alloc_zeroed(layout) });
+        let ptr = ptr_opt.expect("alloc::alloc_zeroed returned null pointer");
+        Self { layout, ptr }
     }
 
     fn erase(&mut self) {
+        let ptr_mut = self.ptr;
         let mut offset = 0;
+        let ptr_mut: *mut u8 = unsafe { self.ptr.as_mut() };
+        assert_eq!(ptr_mut.align_offset(core::mem::size_of::<u64>()), 0);
         while offset < self.layout.size() {
             unsafe {
-                let cur = self.ptr.add(offset) as *mut u64;
+                let cur = ptr_mut.add(offset) as *mut u64;
                 ptr::write_volatile(cur, 0xDEADBEEF);
             }
             offset += size_of::<u64>()
@@ -90,7 +89,8 @@ pub fn run_then_erase(f: fn(), stack_size: usize) {
 
     // Switch the location of the stack and call the wrapper function
     unsafe {
-        let stack_top = mem.ptr.add(mem.layout.size());
+        let raw_ptr: *mut u8 = mem.ptr.as_mut();
+        let stack_top = raw_ptr.add(mem.layout.size());
         run_then_erase_asm(stack_top);
     };
 
