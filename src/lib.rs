@@ -101,14 +101,7 @@ pub fn run_then_erase(f: fn(), stack_size: usize) {
     CTX.with(|cell| {
         let ctx = cell.take();
         if let Some(Err(err)) = ctx.thread_result {
-            // For an unknown reason, memory curruption occurs when we
-            // resume unwinding.  Presumable, the backtrace tool tries to read
-            // from the stack thats has already been deallocated.
-            // This should be fixed when we provide a complete context to the
-            // library user.
-            mem.erase();
-            mem::forget(mem);
-
+            drop(mem); // Make sure the panic handler cannot access secret data
             resume_unwind(err);
         }
     });
