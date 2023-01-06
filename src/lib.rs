@@ -143,7 +143,7 @@ unsafe extern "C" fn run_then_erase_asm(stack_top: *mut u8) {
             "pop rax",
             "pop rbp",
             "mov rsp, rax",
-            user_fn = in(reg) do_run_user_fn,
+            user_fn = sym do_run_user_fn,
             stack_top = in(reg) stack_top,
             out("rax") _,
         );
