@@ -124,29 +124,29 @@ pub fn run_then_erase(f: fn(), stack_size: usize) {
 /// intact.
 #[inline(never)]
 unsafe extern "C" fn run_then_erase_asm(stack_top: *mut u8) {
-        arch::asm!(
-            // Stash the old rsp
-            "mov rax, rsp",
-            // Switch stacks
-            "mov rsp, {stack_top}",
-            // Save the frame pointer and stack pointer values
-            "push rbp",
-            "push rax",
-            // Put the return address on the top of the stack
-            "lea rax, [9999f + rip]",
-            "push rax",
-            // Call the running function using the new stack
-            "jmp {user_fn}",
-            // Wrapped function will return to here
-            "9999:",
-            // Restore the original stack and frame pointer values
-            "pop rax",
-            "pop rbp",
-            "mov rsp, rax",
-            user_fn = sym do_run_user_fn,
-            stack_top = in(reg) stack_top,
-            out("rax") _,
-        );
+    arch::asm!(
+        // Stash the old rsp
+        "mov rax, rsp",
+        // Switch stacks
+        "mov rsp, {stack_top}",
+        // Save the frame pointer and stack pointer values
+        "push rbp",
+        "push rax",
+        // Put the return address on the top of the stack
+        "lea rax, [9999f + rip]",
+        "push rax",
+        // Call the running function using the new stack
+        "jmp {user_fn}",
+        // Wrapped function will return to here
+        "9999:",
+        // Restore the original stack and frame pointer values
+        "pop rax",
+        "pop rbp",
+        "mov rsp, rax",
+        user_fn = sym do_run_user_fn,
+        stack_top = in(reg) stack_top,
+        out("rax") _,
+    );
 }
 
 extern "C" fn do_run_user_fn() {
