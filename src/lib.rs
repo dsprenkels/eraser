@@ -7,17 +7,25 @@ a separate stack and on the heap and executing the user-supplied code with the
 separate stack.  After running the code, we erase the complete stack.
 */
 
+// TODO: Support for Cortex-M4
+// TODO: Also clear all data registers on when erasing
+
 use core::arch;
 use std::cell::RefCell;
-use std::mem;
 use std::panic::resume_unwind;
-use std::ptr::null_mut;
 use std::{alloc, mem::size_of, panic::catch_unwind, ptr};
 
+/// EraserContext contains any information that needs to be passed across the
+/// stack switch barrier from `run_then_erase_asm`.
 #[derive(Debug, Default)]
 struct EraserContext {
+    /// Function specified by the user that should be run in the separate stack.
     user_fn: Option<fn()>,
-    thread_result: Option<std::thread::Result<()>>,
+    /// Panic result describes whether the user's function panicked.  If a
+    /// panic occurred, `panic_result` will encapsulate the error;  if the
+    /// user function succeeded without panic, `panic_result` will be equal
+    /// to `Some(Ok(()))`.
+    panic_result: Option<std::thread::Result<()>>,
 }
 
 thread_local! {
@@ -51,7 +59,6 @@ impl Memory {
     }
 
     fn erase(&mut self) {
-        let ptr_mut = self.ptr;
         let mut offset = 0;
         let ptr_mut: *mut u8 = unsafe { self.ptr.as_mut() };
         assert_eq!(ptr_mut.align_offset(core::mem::size_of::<u64>()), 0);
@@ -83,7 +90,7 @@ pub fn run_then_erase(f: fn(), stack_size: usize) {
     CTX.with(|cell| {
         cell.replace(EraserContext {
             user_fn: Some(f),
-            thread_result: None,
+            panic_result: None,
         })
     });
 
@@ -95,12 +102,12 @@ pub fn run_then_erase(f: fn(), stack_size: usize) {
     };
 
     // Double-check that the user function did indeed finish
-    CTX.with(|cell| assert!(cell.borrow().thread_result.is_some()));
+    CTX.with(|cell| assert!(cell.borrow().panic_result.is_some()));
 
     // If the user function panicked, resume that panic now
     CTX.with(|cell| {
         let ctx = cell.take();
-        if let Some(Err(err)) = ctx.thread_result {
+        if let Some(Err(err)) = ctx.panic_result {
             drop(mem); // Make sure the panic handler cannot access secret data
             resume_unwind(err);
         }
@@ -115,8 +122,20 @@ pub fn run_then_erase(f: fn(), stack_size: usize) {
 /// uses the C ABI.  This way, we know with reasonably certainty that the
 /// calling function has saved any reasonable register that it needs to stay
 /// intact.
+/// 
+/// The API allows the user function to capture from its environment, but this
+/// prevents it from being compatible with the C ABI.  Therefore, we cannot
+/// store and pass it directly through calls that use the C calling convention.
+/// So, instead of directly passing them through the layer, we bypass the layer
+/// and stash the user function thread local storage static value `CTX`.
+/// `do_run_user_fn` will read back the user function out from `CTX` and
+/// execute it using the (unstable) Rust ABI convention (but on the other
+/// stack).
 #[inline(never)]
-unsafe extern "C" fn run_then_erase_asm(stack_top: *mut u8) {
+unsafe fn run_then_erase_asm(stack_top: *mut u8) {
+    // TODO: Go through and guarantee the inline assembly rules listed at
+    // https://doc.rust-lang.org/reference/inline-assembly.html
+
     arch::asm!(
         // Stash the old rsp
         "mov rax, rsp",
@@ -146,15 +165,10 @@ extern "C" fn do_run_user_fn() {
     CTX.with(|cell| {
         let mut ctx = cell.borrow_mut();
         let user_fn_opt = ctx.user_fn;
-        let thread_result = catch_unwind(|| user_fn_opt.expect("EraserContext.user_fn is None"));
-        let user_fn = match thread_result {
-            Ok(x) => x,
-            Err(err) => {
-                ctx.thread_result = Some(Err(err));
-                return;
-            }
-        };
-        ctx.thread_result = Some(catch_unwind(user_fn));
+        ctx.panic_result = Some(catch_unwind(|| {
+            let user_fn = user_fn_opt.expect("EraserContext.user_fn is None");
+            user_fn()
+        }));
     });
 }
 
