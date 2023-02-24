@@ -4,18 +4,16 @@
 This crate provides a runtime context that allows you to securely run code that
 deals with secrets, for example cryptographic code.  It does this by allocating
 a separate stack and on the heap and executing the user-supplied code with the
-separate stack.  After running the code, we erase the complete stack.
+separate stack.  After running the code, we erase the complete stack and (on
+x86_64) we wipe all the CPU registers before returning.
 */
 
 // TODO: Support for Cortex-M4
-// TODO: Also clear all data registers when erasing
 
-use core::arch;
-use std::cell::RefCell;
-use std::panic::resume_unwind;
-use std::{alloc, mem::size_of, panic::catch_unwind, ptr};
+use std::{alloc, arch, cell, panic, ptr};
 
-const ERASE_VALUE: u64 = 0xDEADBEEF_DEADBEEF;
+const STACK_ALIGN: usize = 32;
+const ERASE_VALUE: usize = 0xDEADBEEF_DEADBEEF;
 
 /// EraserContext contains any information that needs to be passed across the
 /// stack switch barrier from `run_then_erase_asm`.
@@ -31,70 +29,70 @@ struct EraserContext {
 }
 
 thread_local! {
-    static CTX: RefCell<EraserContext> = Default::default();
+    static CTX: cell::RefCell<EraserContext> = Default::default();
 }
 
-#[derive(Debug, Clone)]
-struct Memory {
-    layout: alloc::Layout,
-    ptr: std::ptr::NonNull<u8>,
-}
-
-impl Drop for Memory {
-    fn drop(&mut self) {
-        self.erase();
-        unsafe {
-            let ptr_mut = self.ptr.as_mut();
-            alloc::dealloc(ptr_mut, self.layout);
-        }
-    }
-}
-
-impl Memory {
-    fn new(layout: alloc::Layout) -> Self {
-        assert_ne!(layout.size(), 0);
-        // SAFETY:
-        //   * Checked that the size is not equal to 0.
-        let ptr_opt = core::ptr::NonNull::new(unsafe { alloc::alloc_zeroed(layout) });
-        let ptr = ptr_opt.expect("alloc::alloc_zeroed returned null pointer");
-        Self { layout, ptr }
-    }
-
-    fn erase(&mut self) {
-        let mut offset = 0;
-        let ptr_mut: *mut u8 = unsafe { self.ptr.as_mut() };
-        assert_eq!(ptr_mut.align_offset(core::mem::size_of::<u64>()), 0);
-        while offset < self.layout.size() {
-            unsafe {
-                let cur = ptr_mut.add(offset) as *mut u64;
-                ptr::write_volatile(cur, ERASE_VALUE);
-            }
-            offset += size_of::<u64>()
-        }
+unsafe fn erase(ptr_mut: *mut u8, len: usize) {
+    assert_eq!(ptr_mut.align_offset(core::mem::size_of::<usize>()), 0);
+    for offset in (0..len).step_by(core::mem::size_of::<usize>()) {
+        let cur = ptr_mut.add(offset) as *mut usize;
+        ptr::write_volatile(cur, ERASE_VALUE);
     }
 }
 
 /// Run a function on a ephemeral stack and immediately erase the stack
 ///
-/// The `stack_size` specifies the size of the stack that will be provided to
-/// the user function.  It must be a multiple of 32 bytes, or otherwise this
-/// function will panic.
-pub fn run_then_erase(f: fn(), stack_size: usize) {
-    let stack_align = 32;
-    if stack_size % 32 != 0 {
-        panic!(
-            "stack size ({}) not a multiple of {}",
-            stack_size, stack_align
-        );
-    }
-    let layout =
-        alloc::Layout::from_size_align(stack_size, stack_align).expect("Layout::from_size_align");
-    let mut mem = Memory::new(layout);
+/// This function is similar to [`run_then_erase`] but allows the user to
+/// provice their own buffer for the stack.  This is useful when there is no
+/// allocator present, or when the internal stack can be small enough such
+/// that it can be stored on the caller stack.
+///
+/// ## Safety
+///
+/// * The proviced stack buffer must have a length divisible by 32.
+/// * The provided stack buffer must be aligned to 32 bytes.
+/// * The stack buffer must be large enough for the user function.
+///
+/// ## Example
+/// ```
+/// use core::cell::RefCell;
+///
+/// thread_local! {
+///     static RESULT: RefCell<i32> = RefCell::default();
+/// }
+///
+/// #[repr(C, align(32))]
+/// struct AlignedStack { buf: [u8; 4096] };
+///
+/// let mut stack = AlignedStack { buf: [0; 4096] };
+/// unsafe {
+///     eraser::run_then_erase_with_stack(|| {
+///         RESULT.with(|x| x.replace(42));
+///     }, &mut stack.buf);
+/// }
+///
+/// RESULT.with(|x| assert_eq!(*x.borrow(), 42));
+/// ```
+pub unsafe fn run_then_erase_with_stack(f: fn(), stack: &mut [u8]) {
+    let stack_ptr = stack.as_mut_ptr();
+    let stack_top = stack_ptr.add(stack.len());
 
-    if cfg!(feature = "guard_page") {
-        // TODO: Set up a guard page to prevent overflows
-        unimplemented!("guard pages not implemented")
-    }
+    // Check if the stack meets all our criteria
+    assert_eq!(
+        stack_ptr as usize % STACK_ALIGN,
+        0,
+        "stack buffer @ {:p} is not aligned to {}",
+        stack_ptr,
+        STACK_ALIGN
+    );
+    assert_eq!(
+        stack_top as usize % STACK_ALIGN,
+        0,
+        "stack top @ {:p} is not aligned to {} (is the buffer length divisible by {}?)",
+        stack_ptr,
+        STACK_ALIGN,
+        STACK_ALIGN
+    );
 
     // Initialize EraserContext
     CTX.with(|cell| {
@@ -106,28 +104,51 @@ pub fn run_then_erase(f: fn(), stack_size: usize) {
 
     // Switch the location of the stack and call the wrapper function
     unsafe {
-        let raw_ptr: *mut u8 = mem.ptr.as_mut();
-        let stack_top = raw_ptr.add(mem.layout.size());
-        run_then_erase_asm(stack_top);
+        stack_switch(stack_top);
+        erase(stack_ptr, stack.len());
     };
 
-    // Double-check that the user function did indeed finish
-    CTX.with(|cell| assert!(cell.borrow().panic_result.is_some()));
-
-    // If the user function panicked, resume that panic now
     CTX.with(|cell| {
+        // Double-check that the user function did indeed finish
+        assert!(cell.borrow().panic_result.is_some());
+
+        // If the user function panicked, resume that panic now
         let ctx = cell.take();
         if let Some(Err(err)) = ctx.panic_result {
-            drop(mem); // Make sure the panic handler cannot access secret data
-            resume_unwind(err);
+            panic::resume_unwind(err);
         }
     });
+
+    // Erase the stack and wipe all the registers
     unsafe {
+        erase(stack_ptr, stack.len());
         wipe_all_registers();
     }
 }
 
-/// Run the "assembly" part of the `run_then_erase` function.
+/// Run a function on an ephemeral stack and immediately erase the stack.
+///
+/// The `stack_size` specifies the size of the stack that will be provided to
+/// the user function.  It must be a multiple of 32 bytes, or otherwise this
+/// function will panic.
+pub fn run_then_erase(f: fn(), stack_size: usize) {
+    let layout =
+        alloc::Layout::from_size_align(stack_size, STACK_ALIGN).expect("incorrect alignment");
+    let ptr_opt = ptr::NonNull::new(unsafe { alloc::alloc_zeroed(layout) });
+    let mut ptr = ptr_opt.expect("alloc::alloc_zeroed returned null pointer");
+
+    if cfg!(feature = "guard_page") {
+        // TODO: Set up a guard page to catch overflows
+        unimplemented!("guard pages not implemented")
+    }
+
+    unsafe {
+        let stack = core::slice::from_raw_parts_mut(ptr.as_mut(), layout.size());
+        run_then_erase_with_stack(f, stack);
+    }
+}
+
+/// Run the "assembly" part of the `run_then_erase` wrapper.
 ///
 /// This function is separate, because the user function might clobber any kind
 /// of register, even avx2 or x87 registers.  Instead of clobbering *all* of
@@ -145,7 +166,7 @@ pub fn run_then_erase(f: fn(), stack_size: usize) {
 /// execute it using the (unstable) Rust ABI convention (but on the other
 /// stack).
 #[inline(never)]
-unsafe fn run_then_erase_asm(stack_top: *mut u8) {
+unsafe fn stack_switch(stack_top: *mut u8) {
     // TODO: Go through and guarantee the inline assembly rules listed at
     // https://doc.rust-lang.org/reference/inline-assembly.html
 
@@ -178,7 +199,7 @@ extern "C" fn do_run_user_fn() {
     CTX.with(|cell| {
         let mut ctx = cell.borrow_mut();
         let user_fn_opt = ctx.user_fn;
-        ctx.panic_result = Some(catch_unwind(|| {
+        ctx.panic_result = Some(panic::catch_unwind(|| {
             let user_fn = user_fn_opt.expect("EraserContext.user_fn is None");
             user_fn()
         }));
@@ -252,6 +273,24 @@ mod tests {
             ctr = (*cell.borrow()).ctr;
         });
         assert_eq!(ctr, 1);
+    }
+
+    #[test]
+    fn stack_on_stack() {
+        #[repr(C, align(32))]
+        struct AlignedStack {
+            buf: [u8; 4096],
+        }
+
+        let mut stack = AlignedStack { buf: [0; 4096] };
+        unsafe {
+            run_then_erase_with_stack(
+                || {
+                    println!("Hello Eraser!");
+                },
+                &mut stack.buf,
+            );
+        }
     }
 
     fn do_panic() {
