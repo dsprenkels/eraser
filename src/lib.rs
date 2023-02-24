@@ -8,12 +8,14 @@ separate stack.  After running the code, we erase the complete stack.
 */
 
 // TODO: Support for Cortex-M4
-// TODO: Also clear all data registers on when erasing
+// TODO: Also clear all data registers when erasing
 
 use core::arch;
 use std::cell::RefCell;
 use std::panic::resume_unwind;
 use std::{alloc, mem::size_of, panic::catch_unwind, ptr};
+
+const ERASE_VALUE: u64 = 0xDEADBEEF_DEADBEEF;
 
 /// EraserContext contains any information that needs to be passed across the
 /// stack switch barrier from `run_then_erase_asm`.
@@ -65,7 +67,7 @@ impl Memory {
         while offset < self.layout.size() {
             unsafe {
                 let cur = ptr_mut.add(offset) as *mut u64;
-                ptr::write_volatile(cur, 0xDEADBEEF);
+                ptr::write_volatile(cur, ERASE_VALUE);
             }
             offset += size_of::<u64>()
         }
@@ -122,7 +124,7 @@ pub fn run_then_erase(f: fn(), stack_size: usize) {
 /// uses the C ABI.  This way, we know with reasonably certainty that the
 /// calling function has saved any reasonable register that it needs to stay
 /// intact.
-/// 
+///
 /// The API allows the user function to capture from its environment, but this
 /// prevents it from being compatible with the C ABI.  Therefore, we cannot
 /// store and pass it directly through calls that use the C calling convention.
@@ -159,6 +161,7 @@ unsafe fn run_then_erase_asm(stack_top: *mut u8) {
         stack_top = in(reg) stack_top,
         out("rax") _,
     );
+    wipe_all_registers();
 }
 
 extern "C" fn do_run_user_fn() {
@@ -171,6 +174,42 @@ extern "C" fn do_run_user_fn() {
         }));
     });
 }
+
+#[cfg(target_arch = "x86_64")]
+unsafe fn wipe_all_registers() {
+    arch::asm!(
+        "xor rax, rax",
+        "xor rcx, rcx",
+        "xor rdx, rdx",
+        "xor rsi, rsi",
+        "xor rdi, rdi",
+        "xor r8, r8",
+        "xor r9, r9",
+        "xor r10, r10",
+        "xor r11, r11",
+        "xor r12, r12",
+        "xor r13, r13",
+        "xor r14, r14",
+        "xor r15, r15",
+        "vzeroall",
+        lateout("rax") _,
+        lateout("rcx") _,
+        lateout("rdx") _,
+        lateout("rsi") _,
+        lateout("rdi") _,
+        lateout("r8") _,
+        lateout("r9") _,
+        lateout("r10") _,
+        lateout("r11") _,
+        lateout("r12") _,
+        lateout("r13") _,
+        lateout("r14") _,
+        lateout("r15") _,
+    )
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+unsafe fn wipe_all_registers() {}
 
 #[cfg(test)]
 mod tests {
@@ -211,7 +250,7 @@ mod tests {
 
     #[test]
     #[should_panic]
-    fn panicking() {
+    fn explicit_panic() {
         run_then_erase(do_panic, 4096);
     }
 }
