@@ -75,16 +75,24 @@ impl Memory {
 }
 
 /// Run a function on a ephemeral stack and immediately erase the stack
+///
+/// The `stack_size` specifies the size of the stack that will be provided to
+/// the user function.  It must be a multiple of 32 bytes, or otherwise this
+/// function will panic.
 pub fn run_then_erase(f: fn(), stack_size: usize) {
-    // TODO: Document/enforce valid stack_size values
-
-    let stack_align = 1024 * 1024;
+    let stack_align = 32;
+    if stack_size % 32 != 0 {
+        panic!(
+            "stack size ({}) not a multiple of {}",
+            stack_size, stack_align
+        );
+    }
     let layout =
         alloc::Layout::from_size_align(stack_size, stack_align).expect("Layout::from_size_align");
     let mut mem = Memory::new(layout);
 
     if cfg!(feature = "guard_page") {
-        // TODO: Set up a guard pagse to prevent overflows
+        // TODO: Set up a guard page to prevent overflows
         unimplemented!("guard pages not implemented")
     }
 
@@ -114,6 +122,9 @@ pub fn run_then_erase(f: fn(), stack_size: usize) {
             resume_unwind(err);
         }
     });
+    unsafe {
+        wipe_all_registers();
+    }
 }
 
 /// Run the "assembly" part of the `run_then_erase` function.
@@ -161,7 +172,6 @@ unsafe fn run_then_erase_asm(stack_top: *mut u8) {
         stack_top = in(reg) stack_top,
         out("rax") _,
     );
-    wipe_all_registers();
 }
 
 extern "C" fn do_run_user_fn() {
