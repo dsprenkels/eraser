@@ -3,6 +3,26 @@
 `eraser` is a small research crate in which I try to explore if it is possible
 to robustly clean up the memory of a function after it has run.
 
+## Usage
+
+```rust
+use core::cell::RefCell;
+
+thread_local! {
+    static CRYPTO_DATA: RefCell<Vec<u8>> = RefCell::default();
+}
+
+fn do_crypto(crypto_data: &mut Vec<u8>) {
+    // Do some complicated cryptographic operation
+}
+
+unsafe {
+    eraser::run_then_erase(|| {
+        RESULT.with(|cell| do_crypto(cell.borrow_mut()));
+    }, 128 * 1024);
+}
+```
+
 ## Why
 
 Cryptographic code deals constantly with values that should remain secret.
