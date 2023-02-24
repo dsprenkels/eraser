@@ -56,7 +56,7 @@ that already contain stack-switching functionality (one common example is
 Stack-switching is an operation that is usually not well supported by
 programming languages.  In Rust, there is no convenient `switch_stack()`
 function, so we have to write that ourselves.
-The [stack-switching code] well, but it is a fragile piece of assembly.
+The [stack-switching code] works well, but it is a fragile piece of assembly.
 We are messing with the application runtime, and there are so many variables
 involved that it is hard to guarantee that everyting is still memory-safe.
 
