@@ -236,6 +236,22 @@ unsafe fn wipe_all_registers() {
         lateout("r13") _,
         lateout("r14") _,
         lateout("r15") _,
+        lateout("xmm0") _,
+        lateout("xmm1") _,
+        lateout("xmm2") _,
+        lateout("xmm3") _,
+        lateout("xmm4") _,
+        lateout("xmm5") _,
+        lateout("xmm6") _,
+        lateout("xmm7") _,
+        lateout("xmm8") _,
+        lateout("xmm9") _,
+        lateout("xmm10") _,
+        lateout("xmm11") _,
+        lateout("xmm12") _,
+        lateout("xmm13") _,
+        lateout("xmm14") _,
+        lateout("xmm15") _,
     )
 }
 
